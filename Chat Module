@@ -1,0 +1,932 @@
+import UIKit
+import IQKeyboardManagerSwift
+import LinearProgressBar
+import AVKit
+import AVFoundation
+
+enum MessageType: String {
+    case Image = "IMAGE"
+    case Audio = "AUDIO"
+    case Text = "TEXT"
+    case Video = "VIDEO"
+    case Products = "PRODUCTS"
+}
+
+enum EndChatType: String {
+    case END_CHAT = "END_CHAT"
+    case END_AND_PACK = "END_AND_PACK"
+    case CHAT_TIMEOUT = "CHAT_TIMEOUT"
+    case END = "END"
+    case PACKAGING_REJECTED = "PACKAGING_REJECTED"
+    case CHAT_CANCELLED = "CHAT_CANCELLED"
+    case CANCEL = "CANCEL"
+    case FIRST_TIMEOUT = "FIRST_TIMEOUT"
+    case WAITING_REQUEST = "WAITING_REQUEST"
+    case WAITING_LIST_CUSTOMER = "WAITING_LIST_CUSTOMER"
+}
+
+class ChatVC: BaseVC {
+    
+    //MARK:- OUTLETS
+    @IBOutlet weak var progressBar: LinearProgressBar!
+    @IBOutlet weak var bottomConstraint: NSLayoutConstraint!
+    @IBOutlet weak var textBoxTxtView: UITextView!
+    @IBOutlet weak var btnSendMessage: UIButton!
+    @IBOutlet weak var btnAudioMessage: RecordButton!
+    @IBOutlet weak var btnAttachment: UIButton!
+    @IBOutlet weak var tableView: UITableView!
+    @IBOutlet weak var lblTime: UILabel!
+    @IBOutlet weak var lblName: UILabel!
+    @IBOutlet weak var lblChatTime: UILabel!
+    @IBOutlet weak var audioView: RecordView!
+    @IBOutlet weak var stkStd: UIStackView!
+    @IBOutlet weak var stkOvernight: UIStackView!
+    
+    
+    //MARK:- PROPERTIES
+    let textViewMaxHeight: CGFloat = 100
+    var tableDataSource : TableViewDataSourceWithHeader?
+    lazy var items: [TableViewHeaderObjectType] = [TableViewHeaderObjectType]()
+    var chatTimer: Timer? = nil
+    var bgTask: UIBackgroundTaskIdentifier = UIBackgroundTaskIdentifier(rawValue: 0)
+    var time = 1020
+    var requestAcceptModel: RequestAccept?
+    var messagingArray = [ChatDataValues]()
+    let imagePickerManager: ImagePickerManager = ImagePickerManager()
+    var file: MultiPartFile?
+    var checkRequest = false
+    var cellIndexValue: Int?
+    var totalTime = Int()
+    
+    //Player Properties
+    var progressTimer: Timer?
+    {
+        willSet {
+            progressTimer?.invalidate()
+        }
+    }
+    
+    var recordingSession: AVAudioSession!
+    var audioRecorder: AVAudioRecorder!
+    var numberOfRecordings = 0
+    var filePath: URL?
+    
+    var arrMsg = [ChatDataValues]()
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        initialSetup()
+        customSocketsListeners()
+        startTimer()
+    }
+    
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(true)
+        IQKeyboardManager.shared.enableAutoToolbar = false
+        IQKeyboardManager.shared.enable = false
+    }
+    
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(true)
+        stopTimer()
+        NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillShowNotification, object: self.view.window)
+        NotificationCenter.default.removeObserver(self, name: UIResponder.keyboardWillHideNotification, object: self.view.window)
+        
+        IQKeyboardManager.shared.enableAutoToolbar = true
+        IQKeyboardManager.shared.enable = true
+        
+    }
+    
+    //MARK:- ACTIONS
+    @IBAction func endChatTapped(_ sender: Any) {
+        endChat()
+    }
+    
+    @IBAction func sendMessageBtnTapped(_ sender: UIButton) {
+        sendTextMessage(text: textBoxTxtView.text)
+    }
+    
+    @IBAction func sendAttachmentTapped(_ sender: UIButton) {
+        
+        getImage()
+    }
+    @IBAction func btnActionSendAudio(_ sender: UIButton) {
+        
+    }
+    
+}
+
+extension ChatVC {
+    
+    //MARK:- TABLEVIEW
+    func configureTableView() {
+        tableView.registerCells(nibNames: [R.nib.chatItemsTC.name, R.nib.senderTextTC.name, R.nib.receiverTextTC.name, R.nib.senderAudioTC.name, R.nib.receiverAudioTC.name, R.nib.senderProductImageTC.name, R.nib.receiverProductImageTC.name, R.nib.senderImageTC.name, R.nib.receiverImageTC.name])
+        
+        tableView.tableFooterView = UIView()
+        
+        tableDataSource = TableViewDataSourceWithHeader(items: items, tableView: tableView, cellIdentifier: nil)
+        
+        tableDataSource?.blockCellIdentifier = { [weak self]
+            (indexPath) in
+            
+            let section = indexPath.section
+            
+            if let cellType = self?.items[section].rows[indexPath.row] as? ChatDataValues  {
+                switch cellType.messageType {
+                case MessageType.Products.rawValue:
+                    return R.nib.chatItemsTC.name
+                    
+                case MessageType.Image.rawValue:
+                    if cellType.sender?._id == /UDSingleton.shared.user?._id {
+                        return R.nib.senderImageTC.name
+                    } else {
+                        return R.nib.receiverImageTC.name
+                    }
+                    
+                case MessageType.Audio.rawValue:
+                    if cellType.sender?._id == /UDSingleton.shared.user?._id {
+                        return R.nib.senderAudioTC.name
+                    } else {
+                        return R.nib.receiverAudioTC.name
+                    }
+                    
+                case MessageType.Text.rawValue:
+                    if cellType.sender?._id == /UDSingleton.shared.user?._id {
+                        return R.nib.senderTextTC.name
+                    } else {
+                        return R.nib.receiverTextTC.name
+                    }
+                    
+                default:
+                    break
+                }
+            }
+            return R.nib.chatItemsTC.name
+        }
+        
+        tableDataSource?.configureCellBlock = {[weak self] (cell, item, index) in
+            let sectionItem =  self?.items[index.section]
+            if let sectionType = sectionItem?.rows[index.row] as? ChatDataValues {
+                
+                switch sectionType.messageType {
+                    
+                case MessageType.Products.rawValue:
+                    if let cell = cell as? ChatItemsTC {
+                        cell.isSender = (sectionType.sender?._id == /UDSingleton.shared.user?._id)
+                        
+                        cell.delegate = self
+                        cell.items = sectionType.products
+                        cell.indexValue = index.row
+                    }
+                    
+                case MessageType.Text.rawValue:
+                    if sectionType.sender?._id == /UDSingleton.shared.user?._id {
+                        if let cell = cell as? SenderTextTC  {
+                            cell.item = sectionType
+                        }
+                    } else {
+                        if let cell = cell as? ReceiverTextTC  {
+                            cell.item = sectionType
+                        }
+                    }
+                    
+                case MessageType.Image.rawValue:
+                    
+                    if sectionType.sender?._id == /UDSingleton.shared.user?._id {
+                        if let cell = cell as? SenderImageTC {
+                            cell.items = sectionType
+                        }
+                    } else {
+                        if let cell = cell as? ReceiverImageTC {
+                            cell.items = sectionType
+                        }
+                    }
+                    
+                case MessageType.Audio.rawValue:
+                    
+                    if sectionType.sender?._id == /UDSingleton.shared.user?._id {
+                        
+                        if let cell = cell as? SenderAudioTC {
+                            cell.btnPlay.tag = index.row
+                            
+                            if let audioItem = self?.arrMsg[index.row]{
+                                print("index of sender audio cell is:--", index.row)
+                                cell.item = audioItem
+                                cell.audioUrl = audioItem.fileUrl?.original
+                            }
+                            else{
+                                cell.item = nil
+                                cell.audioUrl = ""
+                            }
+                            cell.delegate = self
+                            //cell.item = sectionType
+                        }
+                    } else {
+                        if let cell = cell as? ReceiverAudioTC {
+                            
+                            cell.btnPlay.tag = index.row
+                            print("index of receiver audio cell is:--", index.row)
+                            //cell.item = sectionType
+                            if let audioItem = self?.arrMsg[index.row]{
+                                cell.item = audioItem
+                                cell.audioUrl = audioItem.fileUrl?.original
+                            }
+                            else{
+                                cell.item = nil
+                                cell.audioUrl = ""
+                            }
+                            cell.delegate = self
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        
+        tableDataSource?.heightForRowAt = { (index) in
+            
+            if let section = self.items[index.section].rows[index.row] as? ChatDataValues {
+                switch section.messageType {
+                    
+                case MessageType.Image.rawValue:
+                    return UITableView.automaticDimension
+                case MessageType.Audio.rawValue:
+                    return UITableView.automaticDimension
+                case MessageType.Text.rawValue:
+                    return UITableView.automaticDimension
+                case MessageType.Products.rawValue:
+                    return 180
+                default:
+                    break
+                }
+            }
+            
+            return UITableView.automaticDimension
+        }
+        tableDataSource?.heightForHeaderInSection = { (section, sectionObj) in
+            return 0.01
+        }
+        
+        tableDataSource?.reloadTable(items: items)
+        
+    }
+}
+
+extension ChatVC {
+    
+    //MARK:- FUNCTIONS
+    
+    func initialSetup() {
+        
+        //MARK::- TOKEN EXPIRATION CHECK
+        if AWSUserPool.shared.isTokenExpired(){
+            AWSUserPool.shared.apiRefreshToken { [weak self] (response) in
+                self?.chatIntialData()
+            }
+        }
+        else{
+            chatIntialData()
+        }
+        
+        //stkStd.isHidden = /requestAcceptModel?.overNightOrder
+        stkStd.isHidden = true
+        //stkOvernight.isHidden = !(/requestAcceptModel?.overNightOrder)
+        stkOvernight.isHidden = true
+        
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification, object: nil)
+        
+        textBoxTxtView.delegate = self
+        textBoxTxtView.text = "Write_a_message".localizedString
+        textBoxTxtView.textColor = R.color.grey56()
+        //lblName.setTitle(, for: .normal)
+        
+        audioView.delegate = self
+        btnAudioMessage.recordView = audioView
+        
+        items =  [
+            TableViewHeaderObjectType(rows: messagingArray, type: MessageType.Text)
+        ]
+        
+        self.configureTableView()
+        
+        
+        //Waiting for user response...
+        if requestAcceptModel?.status == ChatStatus.AWAITING_CUSTOMER_CONFIRMATION.rawValue {
+            
+            guard let packingListVC = R.storyboard.chat.packingListVC() else { return }
+            requestAcceptModel?.deliveryChargeConfig = requestAcceptModel?.store?.deliveryChargeConfig
+            packingListVC.model = requestAcceptModel
+            
+            packingListVC.products = requestAcceptModel?.products
+            packingListVC.conversationId = requestAcceptModel?.conversationId
+            packingListVC.nextWorkingDayStartTime = requestAcceptModel?.nextWorkingDayStartTime
+            packingListVC.chatRequestRepresentative = requestAcceptModel?.chatRequestRepresentative
+            packingListVC.chatRequest = requestAcceptModel?.chatRequest
+            packingListVC.isOverNight = (requestAcceptModel?.overNightOrder == true)
+            
+            packingListVC.delegate = self
+            self.presentVC(packingListVC)
+        }
+    }
+    
+    func chatIntialData() {
+        EndPoint.chat(conversationId: /requestAcceptModel?.conversationId, lastId: "").request(isLoader: true, success: { [weak self] (response) in
+            guard let data = response as? ChatData else { return }
+            
+            //fetch products here...
+            let reverseArray = (data.data ?? []).reversed() as [ChatDataValues]
+            self?.arrMsg = reverseArray
+            self?.items[0].rows = reverseArray
+            
+            //chat time calculation
+            let expTime = Int(/(self?.items[0].rows.first as? ChatDataValues)?.chatExpiresAt / 1000)
+            let currentTS = Int(Date().timeIntervalSince1970)
+            self?.time = expTime - currentTS
+            self?.totalTime = /self?.time
+            
+            //Set Intial Datax
+            if reverseArray.first?.sender != nil{
+                self?.lblName.text = /reverseArray.first?.sender?.name
+            }
+            else if reverseArray.first?.user != nil{
+                self?.lblName.text = /reverseArray.first?.user?.name
+            }
+            
+            self?.lblChatTime.text =  "Today, at".localizedString + " " + "\(Date(timeIntervalSince1970: /reverseArray.first?.chatCreatedAt / 1000).toLocalTime())"
+            self?.tableDataSource?.reloadTable(items: self?.items)
+            let indexPath:IndexPath = IndexPath(row:(/self?.items[0].rows.count - 1), section:0)
+            self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+        })
+    }
+    
+    func chatEndAPI() {
+        EndPoint.chatEnd(type: EndChatType.END.rawValue, chatRequestRepresentative: /requestAcceptModel?.chatRequestRepresentative, chatRequest: /requestAcceptModel?.chatRequest, conversationId: /requestAcceptModel?.conversationId).request(isLoader: true, success: { (response) in
+            self.bgTask = UIBackgroundTaskIdentifier.invalid
+            self.stopTimer()
+            self.showRatingScreen()
+        })
+    }
+    
+    private func startTimer() {
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] (t) in
+            let seconds = fmod(Double(/self?.time), 60)
+            let minutes = fmod(trunc(Double(/self?.time / 60)), 60)
+            
+            if (minutes > 0 || seconds > 0)  {
+                let totaltime = String(format:"%02i:%02i", Int(minutes), Int(seconds))
+                self?.lblTime.text = "\(totaltime) " + "Mins".localizedString
+                if self?.time == 0 {
+                    self?.time = 900
+                    self?.endChat()
+                    self?.lblTime.text = "00:00 " + "Mins".localizedString
+                    self?.progressBar.progressValue = CGFloat(0)
+                } else {
+                    self?.progressBar.progressValue = CGFloat((Float(/self?.time)/Float(1020)) * 100)
+                }
+            }
+            self?.time -= 1
+        }
+    }
+    func showRatingScreen(){
+        IQKeyboardManager.shared.enableAutoToolbar = true
+        IQKeyboardManager.shared.enable = true
+        guard let ratingVC = R.storyboard.chat.ratingVC() else { return}
+        ratingVC.delegate = self
+        ratingVC.type = RatingType.CHAT_RATING.rawValue
+        ratingVC.modalPresentationStyle = .overCurrentContext
+        ratingVC.requestAcceptModel = self.requestAcceptModel
+        self.present(ratingVC, animated: false, completion: nil)
+    }
+    func endChat() {
+        alertBox(message: "Are you sure?".localizedString, title: "End_Chat".localizedString) {
+            
+            //MARK::- TOKEN EXPIRATION CHECK
+            if AWSUserPool.shared.isTokenExpired(){
+                AWSUserPool.shared.apiRefreshToken { [weak self] (response) in
+                    self?.chatEndAPI()
+                }
+            }
+            else{
+                self.chatEndAPI()
+            }
+        }
+    }
+    
+    func stopTimer(){
+        //shut down timer
+        chatTimer?.invalidate()
+        chatTimer = nil
+    }
+        
+    @objc func keyboardWillShow(notification: NSNotification) {
+        if let keyboardSize = (notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue {
+            textBoxTxtView.delegate = self
+            let bottomInset = view.safeAreaInsets.bottom
+            self.bottomConstraint.constant = keyboardSize.height - bottomInset
+            
+            UIView.animate(withDuration: 0.5) {
+                self.view.layoutIfNeeded()
+            }
+        }
+    }
+    
+    @objc func keyboardWillHide(notification: NSNotification) {
+        self.bottomConstraint.constant = 15
+    }
+    
+    
+    
+    //MARK:- Send Text Message
+    func sendTextMessage(text: String) {
+        
+        let textModel = Chatt(conversationId: requestAcceptModel?.conversationId, receiver: /requestAcceptModel?.representative?._id, senderUserType: "USER", message: text, messageType: MessageType.Text.rawValue, fileUrl: nil, products: nil)
+        
+        guard let jsonModal = JSONHelper<Chatt>().toDictionary(model: textModel) else {return}
+        //SocketIOManager.sharedInstance.socket.emit(SocketConstant.SEND_MESSAGE, jsonModal)
+        
+        SocketIOManager.sharedInstance.socket.emitWithAck(SocketConstant.SEND_MESSAGE, with: [jsonModal]).timingOut(after: 10.0) { (item) in
+            debugPrint(item)
+        }
+        
+        textBoxTxtView.text = "Write_a_message".localizedString
+        textBoxTxtView.textColor = R.color.grey56()
+        textBoxTxtView.endEditing(true)
+        btnAudioMessage.isHidden = false
+        btnAttachment.isHidden = false
+        btnSendMessage.isHidden = true
+        
+        let messageText = ChatDataValues(_id: "", conversationId: requestAcceptModel?.conversationId, message: text, messageType: MessageType.Text.rawValue, receiver: UserDetail(), sender: UserDetail(_id: /UDSingleton.shared.user?._id, name: /UDSingleton.shared.user?.name))
+        self.items[0].rows.append(messageText)
+        self.arrMsg.append(messageText)
+        self.tableDataSource?.reloadTable(items: self.items)
+        let indexPath:IndexPath = IndexPath(row:(self.items[0].rows.count - 1), section:0)
+        self.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+        
+    }
+    
+    
+    //MARK:- Send Audio Message
+    func sendAudio() {
+        EndPointUploadFile.uploadFiles(type: "AUDIO",
+                                       file: [self.filePath!],
+                                       mimeType: "audio/m4a",
+                                       fileExtension: ".m4a",
+                                       mediaType: .audio,
+                                       fileName: "\(self.filePath!)").request(isLoader: true, success: { [weak self] (response) in
+                                        
+                                        //self?.clearDiskCache()
+                                        
+                                        guard let uploadResponse = response as? UploadModel else {return}
+                                        
+                                        let audioData = MediaModel(original: /uploadResponse.data?.original,
+                                                                   fileName: /uploadResponse.data?.fileName,
+                                                                   type: /uploadResponse.data?.type,
+                                                                   thumbnail: /uploadResponse.data?.thumbnail,
+                                                                   thumbnailMed: /uploadResponse.data?.thumbnailMed)
+                                        
+                                        let audioMessage = Chatt(conversationId: /self?.requestAcceptModel?.conversationId, receiver: /self?.requestAcceptModel?.representative?._id, senderUserType: "USER", message: nil, messageType: MessageType.Audio.rawValue, fileUrl: audioData, products: nil)
+                                        
+                                        
+                                        guard let jsonModal = JSONHelper<Chatt>().toDictionary(model: audioMessage) else {return}
+                                        print("Audio Dictionary", jsonModal)
+                                        SocketIOManager.sharedInstance.socket.emitWithAck(SocketConstant.SEND_MESSAGE, with: [jsonModal]).timingOut(after: 10.0) { (item) in
+                                            print("Audio ACK", item)
+                                            
+                                            let audioResponse = JSONHelper<[ChatDataValues]>().getCodableModel(data: item)
+                                            self?.items[0].rows.append(audioResponse?.first ?? ChatDataValues())
+                                            self?.arrMsg.append(audioResponse?.first ?? ChatDataValues())
+                                            self?.tableDataSource?.reloadTable(items: self?.items)
+                                            
+                                            let indexPath:IndexPath = IndexPath(row:((self?.items[0].rows.count)! - 1), section:0)
+                                            self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                                            
+                                        }
+                                       })
+    }
+    
+    
+    //MARK:- Send Image
+    func sendImage() {
+        
+        EndPointUploadFile.uploadFiles(type: "IMAGE",
+                                       file: [file?.pickedImage?.jpegData(compressionQuality: 0.5) ?? Data()],
+                                       mimeType: "image/*",
+                                       fileExtension: ".jpg",
+                                       mediaType: .image,
+                                       fileName: file?.fileName).request(isLoader: true, success: { [weak self] (response) in
+                                        
+                                        guard let uploadResponse = response as? UploadModel else {return}
+                                        
+                                        let audioData = MediaModel(original: /uploadResponse.data?.original,
+                                                                   fileName: /uploadResponse.data?.fileName,
+                                                                   type: /uploadResponse.data?.type,
+                                                                   thumbnail: /uploadResponse.data?.thumbnail,
+                                                                   thumbnailMed: /uploadResponse.data?.thumbnailMed)
+                                        
+                                        
+                                        let audioMessage = Chatt(conversationId: /self?.requestAcceptModel?.conversationId, receiver: /self?.requestAcceptModel?.representative?._id, senderUserType: "USER", message: nil, messageType: MessageType.Image.rawValue, fileUrl: audioData, products: nil)
+                                        
+                                        
+                                        guard let jsonModal = JSONHelper<Chatt>().toDictionary(model: audioMessage) else {return}
+                                        
+                                        SocketIOManager.sharedInstance.socket .emitWithAck(SocketConstant.SEND_MESSAGE, with: [jsonModal]).timingOut(after: 10.0) { (item) in
+                                            
+                                            let imageResponse = JSONHelper<[ChatDataValues]>().getCodableModel(data: item)
+                                            self?.items[0].rows.append(imageResponse?.first ?? ChatDataValues())
+                                            self?.arrMsg.append(imageResponse?.first ?? ChatDataValues())
+                                            self?.tableDataSource?.reloadTable(items: self?.items)
+                                            
+                                            let indexPath:IndexPath = IndexPath(row:((self?.items[0].rows.count)! - 1), section:0)
+                                            self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                                            
+                                        }
+                                       })
+    }
+    
+    
+    func getImage() {
+        imagePickerManager.uploadDocumentAction(isDocumentRequired: false, isVideo: false) { [weak self] (file) in
+            self?.file = file
+            //MARK::- TOKEN EXPIRATION CHECK
+            if AWSUserPool.shared.isTokenExpired(){
+                AWSUserPool.shared.apiRefreshToken { [weak self] (response) in
+                    self?.sendImage()
+                }
+            }
+            else{
+                self?.sendImage()
+            }
+        }
+    }
+}
+
+
+//MARK:- UITextViewDelegate Methods
+extension ChatVC : UITextViewDelegate {
+    
+    func textViewDidBeginEditing(_ textView: UITextView) {
+        
+        self.tableView.scrollToBottom(animated: false)
+        if textBoxTxtView.textColor == R.color.grey56() {
+            textBoxTxtView.text = nil
+            textBoxTxtView.textColor = UIColor.black
+        }
+    }
+    
+    func textViewDidEndEditing(_ textView: UITextView) {
+        if textBoxTxtView.text.isEmpty {
+            textBoxTxtView.text = "Write_a_message".localizedString
+            textBoxTxtView.textColor = R.color.grey56()
+        }
+    }
+    
+    func textViewDidChange(_ textView: UITextView)
+    {
+        if textView.contentSize.height >= self.textViewMaxHeight {
+            textView.isScrollEnabled = true
+            //textView.frame.size.height = 100
+        }
+        else
+        {
+            if textView.contentSize.height >= 33 {
+                textView.frame.size.height = textView.contentSize.height
+                textView.isScrollEnabled = false
+            }
+        }
+    }
+    
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        
+        let updatedString = (textView.text as NSString?)?.replacingCharacters(in: range, with: text)
+        if updatedString?.count ?? 0 > 0 {
+            btnAudioMessage.isHidden = true
+            btnAttachment.isHidden = true
+            btnSendMessage.isHidden = false
+        } else {
+            btnAudioMessage.isHidden = false
+            btnAttachment.isHidden = false
+            btnSendMessage.isHidden = true
+        }
+        return true
+    }
+    
+    func textViewShouldEndEditing(_ textView: UITextView) -> Bool {
+        
+        if textBoxTxtView.text.isEmpty {
+            textBoxTxtView.text = "Write_a_message".localizedString
+            textBoxTxtView.textColor = UIColor.lightGray
+        }
+        return true
+    }
+}
+
+//MARK:- Socket Listner
+extension ChatVC {
+    
+    func customSocketsListeners() {
+        
+        //Receive New Message
+        SocketIOManager.sharedInstance.receiveMessage = { [weak self] (array) in
+            print("Array-Socket", array)
+            guard let dataArray = array[0] as? [String: Any] else { return }
+            let dataString = dataArray.jsonStringRepresentaiton
+            let dataNow = dataString?.data(using: String.Encoding.utf8, allowLossyConversion: false)!
+            
+            let jsonDecodable = JSONHelper<SocketMessageData>().getCodableModel(data: dataArray)
+            //let jsonDecodable = JSONHelper<SocketMessageData>().getCodableModel(data: dataNow!)
+            
+            let messageType = /jsonDecodable?.messageType
+            
+            switch messageType  {
+                
+            case MessageType.Text.rawValue:
+                
+                let messageText =   ChatDataValues(_id: jsonDecodable?._id, conversationId: jsonDecodable?.conversationId, message: jsonDecodable?.message, messageType: jsonDecodable?.messageType, receiver: jsonDecodable?.receiver, sender: jsonDecodable?.sender)
+                self?.items[0].rows.append(messageText)
+                self?.arrMsg.append(messageText)
+                self?.tableDataSource?.reloadTable(items: self?.items)
+                let indexPath:IndexPath = IndexPath(row:(/self?.items[0].rows.count - 1), section:0)
+                self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                
+            case MessageType.Image.rawValue:
+                
+                let imageResponse = JSONHelper<[ChatDataValues]>().getCodableModel(data: array)
+                self?.items[0].rows.append(imageResponse?.first ?? ChatDataValues())
+                self?.arrMsg.append(imageResponse?.first ?? ChatDataValues())
+                self?.tableDataSource?.reloadTable(items: self?.items)
+                let indexPath:IndexPath = IndexPath(row:(/self?.items[0].rows.count - 1), section:0)
+                self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                
+                
+            case MessageType.Audio.rawValue:
+                let imageResponse = JSONHelper<[ChatDataValues]>().getCodableModel(data: array)
+                self?.items[0].rows.append(imageResponse?.first ?? ChatDataValues())
+                self?.arrMsg.append(imageResponse?.first ?? ChatDataValues())
+                self?.tableDataSource?.reloadTable(items: self?.items)
+                let indexPath:IndexPath = IndexPath(row:(/self?.items[0].rows.count - 1), section:0)
+                self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                
+            case MessageType.Products.rawValue:
+                
+                let imageResponse = JSONHelper<[ChatDataValues]>().getCodableModel(data: array)
+                self?.items[0].rows.append(imageResponse?.first ?? ChatDataValues())
+                self?.arrMsg.append(imageResponse?.first ?? ChatDataValues())
+                self?.tableDataSource?.reloadTable(items: self?.items)
+                let indexPath:IndexPath = IndexPath(row:(/self?.items[0].rows.count - 1), section:0)
+                self?.tableView.scrollToRow(at: indexPath, at: .bottom, animated: true)
+                
+            default:
+                print("Default Chat Case ....")
+            }
+        }
+        
+        
+        //Some chat event occur
+        SocketIOManager.sharedInstance.chatEvent = { [weak self] (array) in
+            print("End Chat", array)
+            guard let dataArray = array[0] as? [String: Any] else { return }
+            let dataString = dataArray.jsonStringRepresentaiton
+            let dataNow = dataString?.data(using: String.Encoding.utf8, allowLossyConversion: false)!
+            let jsonDecodable = JSONHelper<EndSocketModel>().getCodableModel(data: dataArray)
+            
+            switch /jsonDecodable?.type {
+            case EndChatType.END_CHAT.rawValue:
+                
+                self?.alertBoxOk(message: "Chat_is_ended_by_representative".localizedString, title: "End_Chat".localizedString            ) {
+                    self?.showRatingScreen()
+                }
+                break
+                
+            case EndChatType.END_AND_PACK.rawValue:
+                let data = JSONHelper<RequestAccept>().getCodableModel(data: dataArray)
+                
+                guard let packingListVC = R.storyboard.chat.packingListVC() else { return }
+                packingListVC.model = data
+                
+                packingListVC.products = jsonDecodable?.products
+                packingListVC.conversationId = jsonDecodable?.conversationId
+                packingListVC.nextWorkingDayStartTime = jsonDecodable?.nextWorkingDayStartTime
+                packingListVC.chatRequestRepresentative = jsonDecodable?.chatRequestRepresentative
+                packingListVC.chatRequest = jsonDecodable?.chatRequest
+                packingListVC.isOverNight = (jsonDecodable?.overNightOrder == true)
+                packingListVC.delegate = self
+                self?.stopTimer()
+                self?.presentVC(packingListVC)
+                break
+                
+            case EndChatType.CHAT_TIMEOUT.rawValue:
+                
+                let alert = UIAlertController.init(title: "End_Chat".localizedString, message: "Chat_Session_has_been_ended".localizedString, preferredStyle: .alert)
+                alert.addAction(UIAlertAction.init(title: "ok".localizedString, style: .default, handler: { [weak self] (_) in
+                    self?.showRatingScreen()
+                }))
+                self?.presentVC(alert)
+                break
+                
+            case EndChatType.PACKAGING_REJECTED.rawValue:
+                if (/ez.topMostVC?.isKind(of: PackingListVC.self)) {
+                    self?.topMostVC().dismissVC()
+                }
+                let alert = UIAlertController.init(title: "Packaging Rejected".localizedString, message: "PackageRejected".localizedString, preferredStyle: .alert)
+                alert.addAction(UIAlertAction.init(title: "ok".localizedString, style: .default, handler: { [weak self] (_) in
+                    self?.showRatingScreen()
+                }))
+                self?.presentVC(alert)
+                
+            default:
+                break
+            }
+        }
+    }
+}
+
+//MARK:- ActionProtocols
+extension ChatVC: ActionProtocols {
+    func proceedProductPackaging(proceed: Bool) {
+        print("proceed Packaging")
+        
+        if proceed {
+            guard let checkOut = R.storyboard.checkout.checkoutVC() else { return }
+            checkOut.requestAcceptModel = requestAcceptModel
+            pushVC(checkOut)
+        } else {
+            //updateOnDismiss()
+            //If packing gets rejected by user, chat will restart with initial duration
+            //self.time = self.totalTime
+            //self.time = (self.totalTime - self.time)/2
+            //self.startTimer()
+        }
+    }
+    
+    func paymentRefused() {
+        guard let vc = R.storyboard.checkout.paymentRefusedVC() else { return }
+        self.present(vc, animated: false, completion: nil)
+    }
+    
+    func updateOnDismiss() {
+        guard let viewController = self.navigationController?.viewControllers else { return }
+        let viewControllers: [UIViewController] = viewController
+        self.navigationController?.popToViewController(viewControllers[0], animated: true)
+    }
+}
+
+
+extension ChatVC: AVAudioRecorderDelegate{
+    
+    func checkPermission(){
+        recordingSession = AVAudioSession.sharedInstance()
+        
+        do {
+            try recordingSession.setCategory(.playAndRecord, mode: .default)
+            try recordingSession.setActive(true)
+            switch recordingSession.recordPermission {
+                
+            case .granted:
+                self.startRecording()
+                break
+                
+            case .denied:
+                print("Forcefully deny the request.")
+                Alerts.shared.showAlertView(alert: Alert.alert.getLocalised(), message: "MicrophoneAccess".localizedString, buttonTitles: ["Settings".localizedString ], viewController: ez.topMostVC!)
+                break
+                
+            case .undetermined:
+                recordingSession.requestRecordPermission { [weak self] (allowed) in
+                    DispatchQueue.main.async {
+                        if allowed {
+                            self?.startRecording()
+                        } else {
+                            print("Recording failed")
+                        }
+                    }
+                }
+                break
+            }
+//            recordingSession.requestRecordPermission() { [unowned self] allowed in
+//                DispatchQueue.main.async {
+//                    if allowed {
+//                        self.startRecording()
+//                        //self.loadRecordingUI()
+//                    } else {
+//                        // failed to record!
+//                    }
+//                }
+//            }
+        } catch {
+            // failed to record!
+        }
+    }
+    
+    func startRecording() {
+        numberOfRecordings += 1
+        let fileName = getDocumentsDirectory().appendingPathComponent("\(numberOfRecordings).m4a")
+        
+        let settings = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 12000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+        
+        do {
+            audioRecorder = try AVAudioRecorder(url: fileName, settings: settings)
+            audioRecorder.delegate = self
+            //audioRecorder.prepareToRecord()
+            audioRecorder.record()
+            self.filePath = fileName
+        } catch {
+            finishRecording(success: false)
+        }
+    }
+    
+    func getDocumentsDirectory() -> URL {
+        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        return paths[0]
+    }
+    func finishRecording(success: Bool) {
+        
+        textBoxTxtView.isHidden = false
+        btnAttachment.isHidden = false
+        //    btnCamera.isHidden = false
+        audioRecorder.stop()
+        audioRecorder = nil
+        
+        if success {
+            //MARK::- TOKEN EXPIRATION CHECK
+            if AWSUserPool.shared.isTokenExpired(){
+                AWSUserPool.shared.apiRefreshToken { [weak self] (response) in
+                    self?.sendAudio()
+                }
+            }
+            else{
+                sendAudio()
+            }
+            
+        } else {
+            // recording failed 😞
+        }
+    }
+    
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        if !flag {
+            finishRecording(success: false)
+        }
+    }
+}
+
+extension ChatVC: OpenProductDetail{
+    func didOpenProductDetail(productData: Productdata?) {
+        guard let vc = R.storyboard.chat.viewProductVC() else { return }
+        vc.productData = productData
+        self.pushVC(vc)
+    }
+}
+
+
+//MARK:- IRECORDER DELEGATE
+extension ChatVC: RecordViewDelegate {
+    
+    func onStart() {
+        self.audioView.isHidden = false
+        textBoxTxtView.isHidden = true
+        btnAttachment.isHidden = true
+        //      btnCamera.isHidden = true
+        //audioRecorder.record()
+        checkPermission()
+        
+    }
+    
+    func onCancel() {
+        textBoxTxtView.isHidden = false
+        btnAttachment.isHidden = false
+        //     btnCamera.isHidden = false
+    }
+    
+    func onFinished(duration: CGFloat) {
+        //Reset the view
+        textBoxTxtView.isHidden = false
+        btnAttachment.isHidden = false
+        if audioRecorder != nil{
+            finishRecording(success: true)
+        }
+        //   btnCamera.isHidden = false
+    }
+    
+    func onAnimationEnd() {
+        print("onAnimationEnd")
+    }
+}
+
+extension ChatVC: AudioPlaying{
+    func audioPlaying(isPlaying: Bool, index: Int) {
+        self.arrMsg[index].isPlaying = isPlaying
+    }
+}
+
+extension ChatVC: AudioPlayingSender{
+    func audioPlayingSender(isPlaying: Bool, index: Int) {
+        self.arrMsg[index].isPlaying = isPlaying
+    }
+}
